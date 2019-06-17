@@ -1,0 +1,763 @@
+---
+title: "Rent and Income Burdened Neighborhoods"
+author: "Madison Volpe"
+date: "5/4/2019"
+output:
+  md_document:
+    variant: markdown_github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+root_dir <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = root_dir)
+```
+
+```{r include=FALSE}
+suppressPackageStartupMessages(library(raster))
+suppressPackageStartupMessages(library(survey))
+suppressPackageStartupMessages(library(plyr))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(sf)) # for shapefiles
+suppressPackageStartupMessages(library(maptools))
+suppressPackageStartupMessages(library(rgdal))
+suppressPackageStartupMessages(library(rgeos))
+suppressPackageStartupMessages(library(reshape2))
+suppressPackageStartupMessages(library(kableExtra))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(plotly))
+suppressPackageStartupMessages(library(geosphere))
+suppressPackageStartupMessages(library(reshape2))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(RColorBrewer))
+suppressPackageStartupMessages(library(scatterpie))
+```
+
+```{r include=FALSE}
+hvs <- read.csv("./data/data_final/HVS_All_HH_Ind.csv")
+acs <- read.csv("./data/ACS_Data/ACS.2017.Stats.csv")
+```
+
+```{r include=FALSE}
+gentrifying <- data.frame(Name = sort(as.character(unique(acs$Geo.Name))))
+gentrifying$Gentrifying <- NA
+
+#gentrifying
+gentrifying[gentrifying$Name == 'Greenpoint & Williamsburg', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Central Harlem','Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Chinatown & Lower East Side', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Bushwick', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'East Harlem', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Hamilton Heights, Manhattanville & West Harlem', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Bedford-Stuyvesant', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Crown Heights North & Prospect Heights', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Washington Heights, Inwood & Marble Hill', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Hunts Point, Longwood & Melrose', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Astoria & Long Island City', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Sunset Park & Windsor Terrace', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Belmont, Crotona Park East & East Tremont', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Brownsville & Ocean Hill', 'Gentrifying'] <- 'Yes'
+gentrifying[gentrifying$Name == 'Crown Heights South, Prospect Lefferts & Wingate', 'Gentrifying'] <- 'Yes'
+
+#non gentrifying
+gentrifying[gentrifying$Name == 'Concourse, Highbridge & Mount Eden', 'Gentrifying'] <- 'No'
+gentrifying[gentrifying$Name == 'East New York & Starrett City', 'Gentrifying'] <- 'No'
+gentrifying[gentrifying$Name == 'Castle Hill, Clason Point & Parkchester', 'Gentrifying'] <- 'No'
+gentrifying[gentrifying$Name == 'Bensonhurst & Bath Beach', 'Gentrifying'] <- 'No'
+gentrifying[gentrifying$Name == 'Brighton Beach & Coney Island', 'Gentrifying'] <- 'No'
+gentrifying[gentrifying$Name == 'Bedford Park, Fordham North & Norwood', 'Gentrifying'] <- 'No'
+
+#high income 
+gentrifying$Gentrifying[is.na(gentrifying$Gentrifying)] <- 'Higher-income'
+
+#join with acs 
+acs <- left_join(acs, gentrifying, by = c('Geo.Name' = 'Name'))
+
+rm(gentrifying)
+```
+
+## Link ACS variables to HVS responses 
+
+```{r include=FALSE}
+#join with acs by geoid 
+hvs <- left_join(hvs, acs, by = c('geo_id2' = 'GEOID'))
+
+#select variables of interest
+hvs.all <- hvs %>%
+  select(sba.name,Geo.Name,Evicted.Displaced, X_6, Monthly.Gross.Rent,hhinc, Owner.Renter,
+         Rental.Subsidy, Section8, Sex, HH.Race, hspanic, AgeCat, Contrl.Status.Recode, 
+         Structure.Type, Household.Composition, TotalPersonIncome, White.Alone, Total.Population,NonWhite,
+         Prop.Nonwhite, Bachelors.Degree,Median.HH.Income.Year, Median.Gross.Rent, Gentrifying, HH.Education,
+         TotalPersonIncome, HH.Looking.Work, hhweight, pw, X, X.1, starts_with("FW")) %>%
+  mutate(Rent.Less.Median = ifelse(Monthly.Gross.Rent < Median.Gross.Rent, 'Yes', 'No'),
+         HHinc.Less.Median = ifelse(hhinc < Median.HH.Income.Year, 'Yes', 'No'))
+```
+
+```{r include=FALSE}
+ref2 <- hvs.all %>%
+        distinct(X.1, sba.name, hhinc, Median.HH.Income.Year)
+
+
+ref2 <- ref2 %>% 
+  group_by(sba.name) %>% 
+  summarise(mpg = list(enframe(quantile(hhinc, probs=c(0.25,0.5,0.75))))) %>% 
+  unnest
+
+ref2 <- spread(ref2, name, value)
+
+names(ref2)[2:4] <- c('HH.Income.25', 'HH.Income.50', 'HH.Income.75')
+
+hvs.all <- left_join(hvs.all, ref2, by = 'sba.name')
+
+hvs.all <- hvs.all %>%
+           mutate(HHinc.Less.25 = ifelse(hhinc < HH.Income.25, 'Yes', 'No'),
+           HHinc.Less.75 = ifelse(hhinc < HH.Income.75, 'Yes', 'No'))
+rm(ref2)
+```
+
+## Examining Neighborhoods Overall
+
+```{r include=FALSE}
+source("code/ReplicateWeights.R")
+```
+
+```{r include=FALSE}
+shp <- rgdal::readOGR(dsn = "data/NYC_HVS/NYC_Sub_borough_Area")
+shp@data$id = shp@data$bor_subb
+shp.points = fortify(shp, region="id")
+shp.df = plyr::join(shp.points, shp@data, by="id")
+rm(shp.points)
+names(shp.df)[8] <- "sba"
+
+# Get polygons centroids - note - for piecharts over maps use centroids!
+centroids <- as.data.frame(centroid(shp))
+colnames(centroids) <- c("long", "lat") 
+centroids <- data.frame("id" = shp$bor_subb, centroids, "sba.name" = shp$NAME)
+hhtotal <- rep.wts.grp.SE(hvs.all, sba.name)
+hhtotal <- hhtotal[1:2]
+centroids <- merge(centroids, hhtotal, by.x = "sba.name", by.y = "sba.name")
+rm(hhtotal)
+names(centroids)[5] <- "Total"
+```
+
+### Renter v. Owner
+
+```{R}
+Owner.Renter.Est <- rep.wts.2grps.SE(hvs.all,sba.name, Owner.Renter)
+#kable(dcast(melt(Owner.Renter.Est, id.vars=c("sba.name", "Owner.Renter")), sba.name~variable+Owner.Renter))
+```
+
+```{r}
+Owner.Renter.Est <- dcast(Owner.Renter.Est, sba.name ~ Owner.Renter, value.var="N0")
+kable(Owner.Renter.Est, format = 'html', col.names = c('SBA',"Owner Estimate",'Renter Estimate'))
+```
+
+```{r}
+Owner.Renter.Est <- Owner.Renter.Est %>%
+                      mutate(ProportionRenter = Renter/(Owner + Renter))
+
+
+shp.df <- merge(shp.df, Owner.Renter.Est, by.x = "NAME", by.y = "sba.name")
+
+rm(Owner.Renter.Est)
+```
+
+```{r renter_vs_owner_nyc}
+ggplot(shp.df) + 
+      aes(long,lat,group=group) +
+      geom_polygon(aes(fill=ProportionRenter)) + 
+      scale_fill_gradient(low = "black", high = "red") +
+      geom_path(color="white") + 
+      theme_bw() +
+      labs(title = "Owner v. Renters by Neighborhoods",
+         caption = "Source: NYCHVS 2017",
+         fill = NULL) 
+```
+
+### Median Income of Households 
+
+```{r}
+MHI <- hvs.all %>%
+       distinct(sba.name, Median.HH.Income.Year)
+
+shp.df <- merge(shp.df, MHI, by.x = "NAME", by.y = "sba.name")
+
+rm(MHI)
+```
+
+```{r median_household_income_nyc}
+ggplot(shp.df) + 
+      aes(long,lat,group=group) +
+      geom_polygon(aes(fill= Median.HH.Income.Year)) + 
+      scale_fill_gradient(low = "black", high = "red") +
+      geom_path(color="white") + 
+      theme_bw() +
+      labs(title = "Median Household Income",
+          caption = "Source: ACS 2017 5 year estimates",
+         fill = NULL) 
+```
+
+### Income Burdened Households 
+
+#### Less than Median 
+
+* Those households whose household income is less than the Median Household Income in the Past 12 Months from the 2017 American Community Survey (Five year estimates)
+
+```{r}
+Income.Burdened.Est <- rep.wts.2grps.SE(hvs.all,sba.name, HHinc.Less.Median)
+```
+
+```{r}
+#kable(dcast(melt(Income.Burdened.Est, id.vars=c("sba.name", "HHinc.Less.Median")), sba.name~variable+HHinc.Less.Median))
+```
+
+```{r}
+Income.Burdened.Est <- dcast(Income.Burdened.Est, sba.name ~ HHinc.Less.Median, value.var="N0")
+kable(Income.Burdened.Est, format = 'html', col.names = c('SBA',"Above Median",'Below Median'))
+```
+
+```{r}
+names(Income.Burdened.Est)[c(2,3)] <- c("HH.Income.Above.Median", "HH.Below.Median")
+centroids <- merge(centroids, Income.Burdened.Est, by = "sba.name")
+rm(Income.Burdened.Est)
+```
+
+```{r income_burdened_hh_nyc}
+ggplot(shp.df) + 
+      aes(long,lat,group=group) +
+      geom_polygon() +
+     geom_scatterpie(data = centroids, 
+                    aes(long, lat),
+                    cols = c("HH.Income.Above.Median", "HH.Below.Median"), 
+                    alpha = 0.5) +
+    scale_colour_manual(
+        breaks = c("HH.Income.Above.Median","HH.Below.Median"),
+        labels = c("Above", "Below"),
+        values = c("HH.Income.Above.Median" = "blue",
+                   "HH.Below.Median" = "orange")) +
+      geom_path(color="white") + 
+      theme_bw() +
+      coord_fixed() +
+      labs(title = "Income Burdened Households by Sub Borough Area",
+         subtitle = "Hosehold Income below Median v. Household Income above Median",
+         caption = "NYCHVS 2017, Rent Source: 2017 ACS 5-year estimate",
+         fill = NULL)
+```
+
+#### Less than 75% Quantile
+
+```{r}
+Income.Burdened.Est <- rep.wts.2grps.SE(hvs.all,sba.name, HHinc.Less.75)
+```
+
+```{r}
+#kable(dcast(melt(Income.Burdened.Est, id.vars=c("sba.name", "HHinc.Less.75")), sba.name~variable+HHinc.Less.75))
+```
+
+```{r}
+Income.Burdened.Est <- dcast(Income.Burdened.Est, sba.name ~ HHinc.Less.75, value.var="N0")
+kable(Income.Burdened.Est, format = 'html', col.names = c('SBA',"Above 75%",'Below 75%'))
+```
+
+```{r}
+names(Income.Burdened.Est)[c(2,3)] <- c("HH.Income.Above.75", "HH.Income.Below.75")
+
+Income.Burdened.Est <- Income.Burdened.Est %>%
+                       mutate(PropAbove75 = HH.Income.Above.75/(HH.Income.Above.75 + HH.Income.Below.75))
+```
+
+```{r}
+shp.df <- merge(shp.df, Income.Burdened.Est, by.x = "NAME", by.y = "sba.name")
+
+rm(Income.Burdened.Est)
+```
+
+```{r income_less_75_quantile}
+ggplot(shp.df) + 
+      aes(long,lat,group=group) +
+      geom_polygon(aes(fill=PropAbove75)) + 
+      scale_fill_gradient(low = "black", high = "red") +
+      geom_path(color="white") + 
+      theme_bw() +
+      labs(title = "Proportion of Households Above 75% Quantile",
+         caption = "Source: NYCHVS 2017",
+         fill = NULL) 
+```
+
+#### Less than 25% Quantile
+
+```{r}
+Income.Burdened.Est <- rep.wts.2grps.SE(hvs.all,sba.name, HHinc.Less.25)
+```
+
+```{r}
+#kable(dcast(melt(Income.Burdened.Est, id.vars=c("sba.name", "HHinc.Less.25")), sba.name~variable+HHinc.Less.25))
+```
+
+```{r}
+Income.Burdened.Est <- dcast(Income.Burdened.Est, sba.name ~ HHinc.Less.25, value.var="N0")
+kable(Income.Burdened.Est, format = 'html', col.names = c('SBA',"Above 75%",'Below 75%'))
+```
+
+```{r}
+names(Income.Burdened.Est)[c(2,3)] <- c("HH.Income.Above.25", "HH.Income.Below.25")
+
+Income.Burdened.Est <- Income.Burdened.Est %>%
+                       mutate(PropBelow25 = HH.Income.Below.25/(HH.Income.Above.25 + HH.Income.Below.25))
+```
+
+```{r}
+shp.df <- merge(shp.df, Income.Burdened.Est, by.x = "NAME", by.y = "sba.name")
+
+rm(Income.Burdened.Est)
+```
+
+```{r income_less_25_quantile}
+ggplot(shp.df) + 
+      aes(long,lat,group=group) +
+      geom_polygon(aes(fill=PropBelow25)) + 
+      scale_fill_gradient(low = "black", high = "red") +
+      geom_path(color="white") + 
+      theme_bw() +
+      labs(title = "Proportion of Households Below 25% Quantile",
+         caption = "Source: NYCHVS 2017",
+         fill = NULL) 
+```
+
+### Median Gross Rent 
+
+```{r median_gross_rent_nyc}
+MGR <- hvs.all %>%
+       distinct(sba.name, Median.Gross.Rent)
+
+shp.df <- merge(shp.df, MGR, by.x = "NAME", by.y = "sba.name")
+
+rm(MGR)
+
+ggplot(shp.df) + 
+      aes(long,lat,group=group) +
+      geom_polygon(aes(fill= Median.Gross.Rent)) + 
+      scale_fill_gradient(low = "black", high = "red") +
+      geom_path(color="white") + 
+      theme_bw() +
+         labs(title = "Median Gross Rent",
+         caption = "Source: ACS 2017 5 year estimates",
+         fill = NULL) 
+```
+
+```{r}
+renters <- filter(hvs.all, Owner.Renter == 'Renter')
+renters <- filter(renters, Monthly.Gross.Rent != 99999) 
+```
+
+```{r}
+Rent.Burdened.Est <- rep.wts.2grps.SE(renters,sba.name, Rent.Less.Median)
+```
+
+```{r}
+#kable(dcast(melt(Rent.Burdened.Est, id.vars=c("sba.name", "Rent.Less.Median")), sba.name~variable+Rent.Less.Median))
+```
+
+```{r}
+Rent.Burdened.Est <- dcast(Rent.Burdened.Est, sba.name ~ Rent.Less.Median, value.var="N0")
+kable(Rent.Burdened.Est, format = 'html', col.names = c('SBA',"Above Median",'Below Median'))
+```
+
+
+```{r}
+names(Rent.Burdened.Est)[c(2,3)] <- c("HH.Rent.Above.Median", "HH.Rent.Below.Median")
+```
+
+```{r}
+Rent.Burdened.Est <- Rent.Burdened.Est %>%
+                      mutate(PropRentBelowMedian = HH.Rent.Below.Median/(HH.Rent.Above.Median+
+                                                                           HH.Rent.Below.Median))
+```
+
+```{r}
+shp.df <- merge(shp.df, Rent.Burdened.Est, by.x = "NAME", by.y = "sba.name")
+
+rm(Rent.Burdened.Est)
+```
+
+```{r rent_less_median_nyc}
+ggplot(shp.df) + 
+      aes(long,lat,group=group) +
+      geom_polygon(aes(fill=PropRentBelowMedian)) + 
+      scale_fill_gradient(low = "black", high = "red") +
+      geom_path(color="white") + 
+      theme_bw() +
+      labs(title = "Proportion of Households with Rent Less than Median",
+         caption = "Sources: NYCHVS 2017, ACS 2017 5 year estimates",
+         fill = NULL) 
+```
+
+### Educational Attainment
+
+```{r}
+ed <- hvs.all %>%
+        distinct(sba.name, Bachelors.Degree)
+
+shp.df <- merge(shp.df, ed, by.x = "NAME", by.y = "sba.name")
+
+rm(ed)
+```
+
+```{r bachelors_degrees_nyc}
+ggplot(shp.df) + 
+      aes(long,lat,group=group) +
+      geom_polygon(aes(fill=Bachelors.Degree)) + 
+      scale_fill_gradient(low = "black", high = "red") +
+      geom_path(color="white") + 
+      theme_bw() +
+      labs(title = "Estimate: People over 25 w. Bachelor's Degree",
+         caption = "Source: ACS 2017 5 year estimates",
+         fill = NULL) 
+```
+
+#### Median Household Income v. Amount of People Over 25 w. Bachelor's Degrees
+
+```{r income_vs_education}
+ggplot(acs) +
+  aes(x=Median.HH.Income.Year, y = Bachelors.Degree) +
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE) +
+    labs(title = "Population w. Bachelor's Degrees v. Median Household Income",
+         caption = "Source: ACS 2017 5 year estimates",
+         x = 'Median Household Income',
+         y = "Population with Bachelor's Degrees",
+         fill = NULL) 
+```
+
+#### Median Rent v. Amount of People Over 25 w. Bachelor's Degrees 
+
+```{r rent_vs_education}
+ggplot(acs) +
+  aes(x=Median.Gross.Rent, y = Bachelors.Degree) +
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE) +
+    labs(title = "Population w. Bachelor's Degrees v. Median Gross Rent",
+         caption = "Source: ACS 2017 5 year estimates",
+         x = 'Median Gross Rent',
+         y = "Population with Bachelor's Degrees",
+         fill = NULL) 
+```
+
+### Racial Composition 
+
+```{r}
+race <- hvs.all %>%
+        distinct(sba.name, Prop.Nonwhite)
+
+shp.df <- merge(shp.df, race, by.x = "NAME", by.y = "sba.name")
+
+rm(race)
+```
+
+```{r proportion_nonwhite_nyc}
+ggplot(shp.df) + 
+      aes(long,lat,group=group) +
+      geom_polygon(aes(fill=Prop.Nonwhite)) + 
+      scale_fill_gradient(low = "black", high = "red") +
+      geom_path(color="white") + 
+      theme_bw() +
+      labs(title = "Racial Composition of NYC Neighborhoods",
+         caption = "Source: ACS 2017 5 year estimates",
+         fill = NULL) 
+```
+
+#### Proportion Nonwhite v. Median Household Income
+
+```{r nonwhite_vs_income}
+options(scipen = 999)
+ggplot(acs) +
+  aes(x=Median.HH.Income.Year, y = Prop.Nonwhite) +
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE) +
+    labs(title = "Proportion Non White v. Median Household Income",
+         subtitle = 'Proportion of Population Nonwhite',
+         caption = "Source: ACS 2017 5 year estimates",
+         x = 'Median Household Income',
+         y = "Proportion Non White ",
+         fill = NULL) 
+```
+
+* Supports the notion that NYC neighborhoods that are economically segregated tend to be racially segregated, as well 
+
+#### Proportion Nonwhite v. Median Rent
+
+```{r nonwhite_vs_rent}
+options(scipen = 999)
+ggplot(acs) +
+  aes(x=Median.Gross.Rent, y = Prop.Nonwhite) +
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE) +
+    labs(title = "Proportion Non White v. Median Gross Rent",
+         subtitle = 'Proportion of Population Nonwhite',
+         caption = "Source: ACS 2017 5 year estimates",
+         x = 'Median Gross Rent',
+         y = "Proportion Non White ",
+         fill = NULL) 
+```
+
+### Household composition 
+
+```{r householdcomposition_vs_income}
+hhinc.comp <- hvs.all %>%
+              select(hhinc, Household.Composition) %>%
+              filter(hhinc != 9999999)
+
+hhinc.comp <- hhinc.comp %>%
+  mutate(group = case_when(
+    grepl("Married", hhinc.comp$Household.Composition) ~ 'Married',
+    Household.Composition == "SoleMale" | Household.Composition == "SoleFemale" ~ 'Sole',
+    Household.Composition == 'Malew.Kids' | Household.Composition == 'Femalew.Kids' ~ 'Single Parent',
+    Household.Composition == 'Femalew.Adults' | Household.Composition == 'Femalew.AdultsKids'|
+      Household.Composition == 'Malew.Adults' | Household.Composition == 'Malew.AdultsKids' ~ 'Mixed'
+  ))
+
+ggplot(hhinc.comp, aes(x = Household.Composition, y = hhinc, fill = Household.Composition)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_y_continuous(limits = quantile(hhinc.comp$hhinc, c(0.1, 0.9)))+
+  facet_wrap(~group, scales = 'free', ncol = 2) +
+  theme(axis.text.x = element_text(size = 10, angle = 25, hjust = 1))+
+  labs(title = "Household income v. Household composition",
+         subtitle = 'Total household income',
+         caption = "Source: NYCHVS 2017",
+         x = 'Household Composition',
+         y = "Household Income ",
+         fill = NULL) 
+  
+```
+
+
+### Evicted/Displaced Renters 
+
+```{r}
+renters.evicted <- filter(renters, Evicted.Displaced=='Yes')
+renters.evicted  <- rep.wts.2grps.SE(renters.evicted, sba.name, Evicted.Displaced)
+```
+
+```{r}
+#kable(dcast(melt(renters.evicted, id.vars=c("sba.name","Evicted.Displaced")),sba.name~variable+Evicted.Displaced))
+```
+
+```{r}
+renters.evicted <- dcast(renters.evicted, sba.name ~ Evicted.Displaced, value.var="N0")
+kable(renters.evicted, format = 'html', col.names = c('SBA','Evicted'))
+```
+
+```{r}
+names(renters.evicted)[2] <- c("Evicted.HH.Est")
+```
+
+```{r}
+extra <- unique(shp.df$NAME[!shp.df$NAME %in% renters.evicted$sba.name])
+extra <-data.frame(sba.name = extra, Evicted.HH.Est = 0)
+renters.evicted <- rbind(renters.evicted, extra)
+rm(extra)
+```
+
+```{r}
+shp.df <- merge(shp.df, renters.evicted, by.x = "NAME", by.y = "sba.name")
+rm(renters.evicted)
+```
+
+```{r evicteddisplaced_nyc}
+ggplot(shp.df) + 
+      aes(long,lat,group=group) +
+      geom_polygon(aes(fill=Evicted.HH.Est)) + 
+      scale_fill_gradient(low = "black", high = "red") +
+      geom_path(color="white") + 
+      theme_bw() +
+      labs(title = "Estimate: Evicted/Displaced Population",
+         caption = "Source: NYCHVS 2017",
+         fill = NULL) 
+```
+
+## Examining Evicted Individuals 
+
+### Household Income less than Neighborhood Median
+
+```{r}
+renters.evicted <- filter(renters, Evicted.Displaced=='Yes')
+renters.evicted  <- rep.wts.grp.SE(renters.evicted, HHinc.Less.Median)
+```
+
+```{r evicted_income_less_median}
+  ggplot(data = renters.evicted,aes(x=HHinc.Less.Median, y = N0, fill=factor(HHinc.Less.Median))) +
+    geom_bar(stat = 'identity') +
+      labs(title = "Evicted/Displaced with Income less than Neighborhood Median",
+         caption = "Source: NYCHVS 2017",
+         x = "Income Less than Neighborhood Median",
+         y = 'Estimate',
+         fill = NULL)     
+```
+
+### Rent less than Neighborhood Median
+
+```{r}
+renters.evicted <- filter(renters, Evicted.Displaced=='Yes')
+renters.evicted  <- rep.wts.grp.SE(renters.evicted, Rent.Less.Median)
+```
+
+```{r evicted_rent_less_median}
+  ggplot(data = renters.evicted,aes(x=Rent.Less.Median, y = N0, fill=factor(Rent.Less.Median))) +
+    geom_bar(stat = 'identity') +
+      labs(title = "Evicted/Displaced with Rent less than Neighborhood Median",
+         caption = "Source: NYCHVS 2017",
+         x = "Rent Less than Neighborhood Median",
+         y = 'Estimate',
+         fill = NULL)   
+
+rm(renters.evicted)
+```
+
+### Evictions by Gentrification Status
+
+```{r}
+renters.gentrifying <- filter(renters, Evicted.Displaced=='Yes')
+renters.gentrifying  <- rep.wts.grp.SE(renters.gentrifying, Gentrifying)
+```
+
+```{r evicted_neighborhoodstatus}
+ggplot(data = renters.gentrifying,aes(x=Gentrifying, y = N0, fill=factor(Gentrifying))) +
+       geom_bar(stat = 'identity') +
+       labs(title = "Evicted/Displaced by Neighborhood Gentrification Status",
+       caption = "Source: NYCHVS 2017",
+         x = "Gentrification Status",
+         y = 'Estimate',
+         fill = NULL)    
+
+rm(renters.gentrifying)
+```
+
+### Evictions by Househould Composition 
+
+```{r}
+renters.hc <- filter(renters, Evicted.Displaced=='Yes')
+renters.hc  <- rep.wts.grp.SE(renters.hc, Household.Composition)
+```
+
+```{r evicted_householdcomposition}
+ggplot(data = renters.hc,aes(x=Household.Composition, y = N0, fill=factor(Household.Composition))) +
+       geom_bar(stat = 'identity') +
+       labs(title = "Evicted/Displaced by Household Composition",
+       caption = "Source: NYCHVS 2017",
+         x = "Household Composition",
+         y = 'Estimate',
+         fill = NULL)+
+       coord_flip() 
+
+rm(renters.hc)
+```
+
+### Evictions When Income was not Less than Neighborhood Median + Rent was not Less than Neighborhood Median
+
+```{r}
+Unusual <- filter(renters, Evicted.Displaced == 'Yes' & Rent.Less.Median == 'No' & HHinc.Less.Median == 'No')
+```
+
+#### Gentrifying Neighborhood
+
+```{r unusualevictions_gentrification}
+Unusual.Gent <- rep.wts.grp.SE(Unusual, Gentrifying)
+
+ggplot(data = Unusual.Gent, aes(x=Gentrifying, y = N0, fill = factor(Gentrifying))) +
+  geom_bar(stat='identity') +
+      labs(title = "Evicted/Displaced by Gentrification Status",
+      subtitle = "For households with Rent and Household Income not less than Neighborhood Median",
+      caption = "Source: NYCHVS 2017",
+      x = "Gentrification Status",
+      y = 'Estimate',
+      fill = NULL)    
+
+rm(Unusual.Gent)
+```
+
+#### Household Type
+
+```{r unusualevictions_householdcomposition}
+Unusual.HouseholdComposition <- rep.wts.grp.SE(Unusual, Household.Composition)
+ggplot(data = Unusual.HouseholdComposition, aes(x=Household.Composition, y = N0, fill =
+                                                  factor(Household.Composition))) +
+  geom_bar(stat='identity') +
+      labs(title = "Evicted/Displaced by Household Type",
+      subtitle = "For households with Rent and Household Income not less than Neighborhood Median",
+      caption = "Source: NYCHVS 2017",
+      x = "Household Type",
+      y = 'Estimate',
+      fill = NULL) + 
+      coord_flip()
+
+rm(Unusual.HouseholdComposition)
+```
+
+#### Age
+
+```{r unusualevictions_age}
+Unusual.Age <- rep.wts.grp.SE(Unusual, AgeCat)
+
+ggplot(data = Unusual.Age, aes(x=AgeCat, y = N0, fill =
+                                                  factor(AgeCat))) +
+  geom_bar(stat='identity') +
+      labs(title = "Evicted/Displaced by Age",
+      subtitle = "For households with Rent and Household Income not less than Neighborhood Median",
+      caption = "Source: NYCHVS 2017",
+      x = "Age",
+      y = 'Estimate',
+      fill = NULL) + 
+      coord_flip()
+
+rm(Unusual.Age)
+```
+
+#### Housing Type 
+
+```{r unusualevictions_housingtype}
+Unusual.HousingType <- rep.wts.grp.SE(Unusual, Contrl.Status.Recode)
+
+ggplot(data = Unusual.HousingType, aes(x=Contrl.Status.Recode, y = N0, fill =
+                                                  factor(Contrl.Status.Recode))) +
+  geom_bar(stat='identity') +
+      labs(title = "Evicted/Displaced by Housing Type",
+      subtitle = "For households with Rent and Household Income not less than Neighborhood Median",
+      caption = "Source: NYCHVS 2017",
+      x = "Housing Type",
+      y = 'Estimate',
+      fill = NULL) + 
+      coord_flip()
+
+rm(Unusual.HousingType)
+```
+
+## Conclusions 
+
+* At least in NYC, it seems that most evictions are due to household income constraints. We can postulate that people with income constraints are being driven out by changing neighborhood characteristics, but we cannot say for certain that these evictions are 'coerced' or 'routine'.
+
+* I am suprised by the households that were evicted/displaced without any income and/or rent constraints, it is hard to classify these types of evictions since it seems that they are mostly at random. 
+
+* Although we hear about coereced evictions happening in NYC neighborhoods, perhaps they are not as prominent as we think. We hear about the tragic cases and how it affects the individuals involved, but perhaps they are more isolated than we care to give on. Sometimes news stories of tragic events can make people think events are more prominent than they actually are in reality. 
+
+* Though the lack of key findings in the EDA could be due to 'sensationalism', I think what really constrained this project, as I have been saying from the start, is the lack of transparent evictions data in NYC. The ecourts system makes it difficult to scrape case information and all landlord tenant cases are removed from the site 14 days after any court appearance. Scheduled Marshal Evictions are released on NYC open data, but the case numbers do not correspond to relevant cases in the ecourts system, therefore making it hard to get more necessary information surrounding the case. 
+
+* Using the NYCHVS survey allows us to identify renters who were evicted/displaced, we are also able to glean more  information about the households, such as income, current rent, household composition, and household condition. However, there are some negatives to using the survey: 
+
+1. We have to assume people are staying in the same neighborhood after they were evicted 
+2. We have to trust people's suvey responses (response bias)
+3. Partly my fault, but this is a cross-sectional analysis, I could have dived deeper and did a longitudinal analysis with data dating back to the 1990s. (Time is of the essence)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
